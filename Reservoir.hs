@@ -1,14 +1,19 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE BangPatterns #-}
+
+
 import Control.Monad (when)
 import Control.Monad.ST
 import Control.Monad.State.Strict
 import Data.Vector.Algorithms.Intro (sort)
 import qualified Data.Vector.Unboxed as V
+import qualified Data.Vector as BV
+import qualified Data.Vector.Generic as G
+import qualified Data.Vector.Generic.Mutable as MG
+import qualified Data.Vector.Mutable as BMV
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word
 import System.Random.Mersenne.Pure64
-import System.Random.Mersenne
 import System.Random (randomR)
 import System.Random.MWC
 import Gauge
@@ -38,26 +43,62 @@ sampleNoReplace :: (V.Unbox a) => Word64 -> Int -> V.Vector a -> V.Vector a
 sampleNoReplace !seed !n !v = runST $ do
     let (initVals, rest) = V.splitAt n v 
     randVals <- V.thaw initVals --take the first n as the initial sample
+    let go randVals n (i,x) = do
+        --replace a value at random with prob. (n / (n + i))
+        g <- get
+        let (r, newgen) = randomInt g
+            r' = r `mod` (n + i + 1)
+        put newgen
+        when (r' < n) $
+            MV.unsafeWrite randVals r' x
+
     evalStateT (V.mapM_ (go randVals n) (V.indexed rest)) (pureMT seed) --element replacement
     V.unsafeFreeze randVals
-    where
-        go randVals n (i,x) = do
-            --replace a value at random with prob. (n / (n + i))
-            g <- get
-            let (r, newgen) = randomInt g
-                r' = r `mod` (n + i + 1)
-            put newgen
-            when (r' < n) $
-                MV.unsafeWrite randVals r' x
 
+--sampling without replacement
+--O(v)
+{-# INLINEABLE sampleNoReplaceB #-}
+sampleNoReplaceB :: Word64 -> Int -> BV.Vector a -> BV.Vector a
+sampleNoReplaceB !seed !n !v = runST $ do
+    let (initVals, rest) = BV.splitAt n v 
+    randVals <- BV.thaw initVals --take the first n as the initial sample
+    let go randVals n (i,x) = do
+        --replace a value at random with prob. (n / (n + i))
+        g <- get
+        let (r, newgen) = randomInt g
+            r' = r `mod` (n + i + 1)
+        put newgen
+        when (r' < n) $
+            BMV.unsafeWrite randVals r' x
+
+    evalStateT (BV.mapM_ (go randVals n) (BV.indexed rest)) (pureMT seed) --element replacement
+    BV.unsafeFreeze randVals
+
+
+--sampling without replacement
+--O(v)
+{-# INLINEABLE sampleNoReplaceMWC #-}
+sampleNoReplaceMWC :: (V.Unbox a) => Word32 -> Int -> V.Vector a -> V.Vector a
+sampleNoReplaceMWC !seed !n !v = runST $ do
+    gen <- initialize $ V.singleton seed
+    let (initVals, rest) = V.splitAt n v 
+    randVals <- V.thaw initVals --take the first n as the initial sample
+    let go n (i,x) = do
+            --replace a value at random with prob. (n / (n + i))
+            r <- uniformR (0, n + i) gen
+            when (r < n) $
+                MV.unsafeWrite randVals r x
+    V.mapM_ (go n) (V.indexed rest) --element replacement
+    V.unsafeFreeze randVals
+ 
 {-# INLINEABLE sampleReplace #-}
 --sampling with replacement
 --O(n)
 sampleReplace :: (V.Unbox a) => Word64 -> Int -> V.Vector a -> V.Vector a
-sampleReplace !seed !n !v = V.backpermute v rvs
+sampleReplace !seed !n !v = G.backpermute v rvs
     where
-        l = V.length v
-        rvs = evalState (V.replicateM n getR) (pureMT seed)
+        l = G.length v
+        rvs = evalState (G.replicateM n getR) (pureMT seed)
         getR = do
             gen <- get
             let (r, newgen) = randomInt gen
@@ -90,11 +131,13 @@ sampleReplace' !seed !n !v = do
 --}
 
 
-a = V.fromList [1..10000] :: V.Vector Int 
-main' = defaultMain [bench "Mersenne Twister" $ whnf (flip (sampleReplace 420) a) 1200
-                   ,bench "MWC" $ whnf (flip (sampleReplaceMWC 420) a) 1200
+a = V.fromList [1..1000000] :: V.Vector Int 
+b = BV.fromList [1..1000000] :: BV.Vector Int 
+main = defaultMain [bench "Mersenne Twister" $ whnf (flip (sampleNoReplace 420) a) 120
+                   ,bench "MWC" $ whnf (flip (sampleNoReplaceMWC 420) a) 120
+                   ,bench "BV" $ whnf (flip (sampleNoReplaceB 420) b) 120
                    ] 
 
-main = do
-    let rands = sampleReplaceMWC 420 1200 a
+main' = do
+    let rands = sampleNoReplaceMWC 420 1200 a
     print rands
